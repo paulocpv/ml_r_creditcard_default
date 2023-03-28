@@ -1,0 +1,259 @@
+---
+title: "Machine Learning with R: Predicting Client Default Probability"
+author: Paulo Peña
+date: "2023-03-28"
+output: 
+  html_document: 
+    toc: yes
+    fig_width: 8
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+
+The following document presents a machine learning exercise for predicting the probability that a client will default on loan payments. We will use the credit card database from Brett Lantz's book, "Machine Learning with R". The dataset has been made publicly available by Zach Stednick on his GitHub page. By using this dataset, we aim to build a model that can accurately predict the likelihood of a client failing to make loan payments.
+
+The ML models used in this exercise were the General Lineal Model (glm), kNN, Random Forest and XGBoost. In the end, we will compare the performance of each model based on their Area Under the Curve (AUC).
+
+## Loading Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(caret) # for machine learning
+library(tidyverse) # for data wrangling and plots
+library(xgboost) # for xgboost
+library(pROC) # for ROC curve analysis and model selection
+```
+
+## Loading the Data Set
+
+```{r}
+url <- "https://raw.githubusercontent.com/stedy/Machine-Learning-with-R-datasets/master/credit.csv"
+data <- read.csv(url, sep = ",")
+```
+
+The variable we are interested in is whether or not a loan payment is defaulted. We will first rename the variable of interest as "target" since it is the primary variable we aim to predict. Following that, we will transform the target variable into a factor, which is a categorical variable that represents the two possible outcomes of our prediction: default (1) or non-default (2). By doing so, we can effectively train and evaluate our machine learning models to predict the target variable's values.
+
+```{r}
+data_clean <- data |>
+  rename(target = default) |>
+  mutate(target = factor(target))
+```
+
+Let's check our target distribution
+
+```{r, message=FALSE, warning=FALSE}
+prop.table(summary(data_clean$target))
+```
+
+## Data Partition
+
+We use `'set.seed()'` to ensure the reproducibility of our random generated selection of indices. Then, the data set is split into a training and a test set
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(42)
+index <- createDataPartition(data_clean$target, times = 1, p = 0.2, list = FALSE)
+train_set <- data_clean[-index,]
+test_set <- data_clean[index,]
+```
+
+## Some Exploratory Analysis
+
+Is important to establish a baseline prediction. In this case, the simplest approach is to randomly guess the target variable. We can observe that the accuracy of this baseline is comparable to flipping a coin.
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(3)
+y_hat <- sample(c(1, 2), length(index), replace = TRUE) |>
+  factor(levels = levels(test_set$target))
+
+mean(y_hat == test_set$target)
+```
+
+Let's see if the accuracy improves by using an specific variable as a predictor. A good candidate could be the credit score variable.
+
+```{r, message=FALSE, warning=FALSE}
+data_clean |>
+  group_by(credit_history) |>
+  summarise(mean(target == 2))
+
+y_hat_1 <- if_else(test_set$credit_history %in% c("fully repaid", "fully repaid this bank") , 2, 1)
+
+mean(y_hat_1 == test_set$target)
+```
+
+Using one variable has resulted in a significant improvement. Let's no try using all the variables available.
+
+## General Linear Model (glm)
+
+First, we will use a Logistic Regression Model using all the variables available in the dataset as predictors. Again, is important to set a seed before running the model to ensure reproducibility.
+
+After building the model, we will calculate the model coefficients using the `confusionMatrix()` function. By selecting the `$Class` element we will would be able to retrieve all relevant coefficients to evaluate our model.
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(45)
+fit_1 <- train(target ~ ., train_set,
+               method = "glm")
+
+mean(test_set$target == predict(fit_1, test_set)) # to calculate Accuracy
+
+matrix_1 <- confusionMatrix(predict(fit_1, test_set), as.factor(test_set$target))
+matrix_1$byClass
+```
+
+For this exercise we will just focus on the "Accuracy", "Precision" and "Recall". Accuracy is the percentage of correct predictions made by the model, either is a positive or a negative outcome. Precision is the percentage of true positives from all the predicted outcomes (true positives and false positives) and Recall is the ratio of true positives from the total number of positive outcomes.
+
+The `glm` model achieved an overall Accuracy of 76%, this means that it correctly classified 76% of all regardless if they were positive or negative . Also, the model had a Precision score of 79%, meaning that of all the cases predicted as positive, 79% were correctly classified. Finally, the model reach a Recall ratio of 89% which means that out of all the real positive cases, the model correctly classified 89% of them.
+
+## k-Nearest Neighbor (kNN)
+
+This is non-parametric supervised learning algorithm that classifies a data point based on its similarity to other observations in the cluster. For our exercise we will use 20-cross-validation training, with a k tuning from 3 to 71 in steps of 3.
+
+```{r, message=FALSE, warning=FALSE}
+trControl <- trainControl(method  = "cv",
+                          number  = 20)
+
+set.seed(8)
+fit_2 <- train(target ~ ., train_set,
+               method = "knn",
+               trControl  = trControl,
+               metric     = "Accuracy",
+               tuneGrid = data.frame(k = seq(3, 71, 3)))
+
+mean(test_set$target == predict(fit_2, test_set))
+
+matrix_2 <- confusionMatrix(predict(fit_2, test_set), as.factor(test_set$target))
+matrix_2$byClass
+```
+
+The `knn` model achieved an overall Accuracy of 70%, a Precision score of also 70% and a Recall ratio of 99%. Even though, the model correctly classified most of all the positive cases, the probability of a wrong classification is higher than in the `glm` model.
+
+## Random Forest
+
+Now let´s use a simple Random Forest algorithm. We will set the training hyperparameters to a 100 trees and a tuning greed in a sequence from 1 to 7.
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(23)
+fit_3 <- train(target ~ ., train_set,
+                method = "rf",
+                tuneGrid = data.frame(mtry = seq(1:7)),
+                ntree = 100)
+
+mean(test_set$target == predict(fit_3, test_set))
+
+matrix_3 <- confusionMatrix(predict(fit_3, test_set), as.factor(test_set$target))
+matrix_3$byClass
+```
+
+The `rf` model achieve an accuracy of 74%, a Precision of 75.6% and a Recall Ratio of 93%. We attain a better results than the `knn` model and very similar to the `gml`, mainly on accuracy.
+
+## XGBoost
+
+The XGBoost its a very powerful classification algorithm that uses an optimized gradient boosting, making it a popular choice for classification tasks. Chen and Gestrin's 2016 paper provides a detail review about this algorithm. Before training the model, first we need to arrange our data in a matrix format and convert the target variable into a one-hot encoding.
+
+```{r, message=FALSE, warning=FALSE}
+# Pre-processing train set
+train_xgb_set <- train_set |>
+  mutate_if(is.character, as.factor) |>
+  mutate_if(is.factor, as.numeric) |>
+  mutate(target = if_else(target == 1, 0, 1))
+
+# Pre-processing test set
+test_xgb_set <- test_set |>
+  mutate_if(is.character, as.factor) |>
+  mutate_if(is.factor, as.numeric) |>
+  mutate(target = if_else(target == 1, 0, 1))
+```
+
+We have trained this `xgboost` with a learning rate of 0.071, a subsample of 0.99, max depth of 11 and a colsample_bytree of 0.85. This particular setting gave us the best results for our task, however you're welcome to try different hyperparameters and see how they affect what results.
+
+```{r, message=FALSE, warning=FALSE}
+# Training the model
+xgb_train_matrix <- xgb.DMatrix(
+  data = as.matrix(train_xgb_set[,!names(train_xgb_set) %in% c("target")]),
+                         label = train_xgb_set$target)
+
+xgb_params <- list(objective = "binary:logistic", eval_metric = "auc",
+                   max_depth = 11, eta = 0.071, subsample = 0.99,
+                   colsample_bytree = 0.85)
+
+set.seed(17)
+xgb_fit <- xgb.train(params = xgb_params,
+                     data = xgb_train_matrix, verbose = 1,
+                     nrounds = 155)
+
+# Evaluate xgboost Model on Test Set
+xgb_test <- xgb.DMatrix(
+  data = as.matrix(test_xgb_set[,!names(test_xgb_set) %in% c("target")]))
+
+xgb_predictions <- ifelse(predict(xgb_fit, newdata = xgb_test) > 0.5,1,0)
+
+mean(test_xgb_set$target == xgb_predictions)
+
+matrix_4 <- confusionMatrix(as.factor(xgb_predictions),
+                            as.factor(test_xgb_set$target))
+matrix_4$byClass
+```
+
+The `xgboost` achieved an Accuracy of 78.5%, the highest so far. Also, the model achieved a Precision score of 80.5% and a Recall ratio of 91.4%, higher than the `glm` and simlar to the `rf`.
+
+## ROC Curve
+
+Finally, we will perform a ROC analysis to chose the best model for our credit card default classification task.
+
+```{r, message=FALSE, warning=FALSE}
+# Using the ROC Curve to evaluate the models
+glm_roc <- roc(as.numeric(test_set$target), as.numeric(predict(fit_1, test_set)))
+knn_roc <- roc(as.numeric(test_set$target), as.numeric(predict(fit_2, test_set)))
+rf_roc <- roc(as.numeric(test_set$target), as.numeric(predict(fit_3, test_set)))
+xgboost_roc <- roc(as.numeric(test_xgb_set$target), xgb_predictions)
+```
+
+```{r}
+# Combining ROC data into a single data frame
+roc_data <- rbind(
+  data.frame(Model = "GLM", glm_roc |> coords()),
+  data.frame(Model = "kNN", knn_roc |> coords()),
+  data.frame(Model = "Random Forest", rf_roc |> coords()),
+  data.frame(Model = "XGBoost", xgboost_roc |> coords())
+)
+
+
+# Plot ROC curves using ggplot2
+ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(aes(color = Model)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "ROC Curves", x = "False Positive Rate", y = "True Positive Rate") +
+  facet_wrap(~ Model, scales = "free") +
+  theme_bw()
+```
+
+The ROC curve is an easy and fast way to mesure the performance of a binary classification model, the higher the better. On the other hand, the Area Under the ROC Curve (auc) is the probability that our ML classification model "will rank a randomly chosen positive instance higher than a randomly chosen negative instance" (Fawcett, 2006, p. 868).
+
+In this exercise, the `glm` and `xgboost` models showed the best curve. Now, lets see the percentage of the `auc` to see which model had a better performance.
+
+```{r}
+auc_table <- data.frame(model = c("glm", "XGBoost", "kNN", "Random Forest"),
+                        auc = c(glm_roc$auc, xgboost_roc$auc,
+                                      knn_roc$auc, rf_roc$auc))
+
+knitr::kable(digits = 2, arrange(auc_table, -auc), align = "lc")
+```
+
+After checking all indicators, the best model for our classification task turn out to be the XGBoost, with an AUC of 70%, which falls inside the rule of thumb for an acceptable model. This is further evidence to chose this model for clasifcation tasks.
+
+## References
+
+Chen, T., & Guestrin, C. (2016). XGBoost: A Scalable Tree Boosting System. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (pp. 785-794). ACM. Retrieved from: <https://arxiv.org/abs/1603.02754>
+
+Fawcett, T. (2006). An introduction to ROC analysis. Pattern Recognition Letters, 27(8), 861-874. doi: 10.1016/j.patrec.2005.10.010. Retrieved from: <https://people.inf.elte.hu/kiss/11dwhdm/roc.pdf>
+
+Lantz, B. (2013). Machine Learning with R. Packt Publishing. Retrieved from: <https://supermariogiacomazzo.github.io/STOR538_WEBSITE/Textbooks%20in%20R/Machine%20Learning%20with%20R.pdf>
+
+Stedy. (n.d.). Machine-Learning-with-R-datasets. Retrieved from <https://github.com/stedy/Machine-Learning-with-R-datasets>
+
+## Acknowledgment
+
+I acknowledge that the paragraphs of this article were written with the help of Chat-GPT 3.5.
